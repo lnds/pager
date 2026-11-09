@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pager</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Pager</h1>
+    <nav>
+      <button class="nav-btn active" data-section="incidents">Incidentes</button>
+      <button class="nav-btn" data-section="postmortems">Post-Mortems</button>
+    </nav>
+  </header>
+
+  <div id="error-banner" class="error-banner" role="alert"></div>
+
+  <main>
+    <!-- INCIDENTS -->
+    <section id="incidents" class="section active">
+      <div class="section-header">
+        <h2>Incidentes</h2>
+        <button class="btn btn-danger" onclick="showModal('new-incident-modal')">Nuevo incidente</button>
+      </div>
+      <div id="summary-bar" class="summary-bar"></div>
+      <form id="search-form" class="search-form">
+        <input type="search" id="search-input" placeholder="Buscar por título o servicio...">
+        <select id="sort-select">
+          <option value="started_at">Más recientes</option>
+          <option value="severity">Por severidad</option>
+        </select>
+        <button type="submit" class="btn btn-sm">Buscar</button>
+      </form>
+      <div class="filters">
+        <button class="filter-btn active" data-status="">Todos</button>
+        <button class="filter-btn" data-status="open">Abiertos</button>
+        <button class="filter-btn" data-status="investigating">Investigando</button>
+        <button class="filter-btn" data-status="mitigated">Mitigados</button>
+        <button class="filter-btn" data-status="resolved">Resueltos</button>
+      </div>
+      <div id="incidents-list" class="card-list"></div>
+    </section>
+
+    <!-- INCIDENT DETAIL -->
+    <section id="incident-detail" class="section">
+      <button class="btn btn-back" onclick="showSection('incidents')">&larr; Volver a incidentes</button>
+      <div id="incident-detail-content"></div>
+    </section>
+
+    <!-- POST-MORTEMS -->
+    <section id="postmortems" class="section">
+      <div class="section-header">
+        <h2>Post-Mortems</h2>
+      </div>
+      <div id="postmortems-list" class="card-list"></div>
+    </section>
+  </main>
+
+  <!-- MODALS -->
+  <div id="new-incident-modal" class="modal">
+    <div class="modal-content">
+      <h3>Nuevo incidente</h3>
+      <form id="new-incident-form" onsubmit="createIncident(event)">
+        <label>Servicio
+          <select name="service_id" required id="incident-service-select"></select>
+        </label>
+        <label>Título
+          <input type="text" name="title" required placeholder="Latencia alta en checkout...">
+        </label>
+        <label>Severidad
+          <select name="severity" required>
+            <option value="1">SEV1 - Crítico</option>
+            <option value="2" selected>SEV2 - Mayor</option>
+            <option value="3">SEV3 - Menor</option>
+            <option value="4">SEV4 - Bajo</option>
+          </select>
+        </label>
+        <label>Reportado por
+          <input type="text" name="created_by" value="operator" required>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="btn" onclick="hideModals()">Cancelar</button>
+          <button type="submit" class="btn btn-danger">Crear incidente</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="new-postmortem-modal" class="modal">
+    <div class="modal-content modal-wide">
+      <h3>Escribir post-mortem</h3>
+      <form id="new-postmortem-form" onsubmit="createPostmortem(event)">
+        <input type="hidden" name="incident_id" id="pm-incident-id">
+        <label>Resumen
+          <textarea name="summary" required rows="2" placeholder="Breve descripción de lo que pasó..."></textarea>
+        </label>
+        <label>Causa raíz
+          <textarea name="root_cause" required rows="3" placeholder="¿Cuál fue la causa subyacente?"></textarea>
+        </label>
+        <label>Impacto
+          <textarea name="impact" required rows="2" placeholder="Usuarios afectados, impacto en SLO, duración..."></textarea>
+        </label>
+        <label>Acciones a tomar
+          <textarea name="action_items" required rows="3" placeholder="1. Arreglar X&#10;2. Agregar monitoreo de Y&#10;3. Revisar Z"></textarea>
+        </label>
+        <label>Lecciones aprendidas
+          <textarea name="lessons" rows="2" placeholder="¿Qué aprendimos?"></textarea>
+        </label>
+        <label>Autor
+          <input type="text" name="author" required placeholder="Ana Soto">
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="btn" onclick="hideModals()">Cancelar</button>
+          <button type="submit" class="btn btn-primary">Publicar post-mortem</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="update-incident-modal" class="modal">
+    <div class="modal-content">
+      <h3>Actualizar incidente</h3>
+      <form id="update-incident-form" onsubmit="updateIncident(event)">
+        <input type="hidden" name="incident_id" id="update-incident-id">
+        <label>Estado
+          <select name="status" id="update-status-select">
+            <option value="">-- no cambiar --</option>
+            <option value="investigating">Investigando</option>
+            <option value="mitigated">Mitigado</option>
+            <option value="resolved">Resuelto</option>
+          </select>
+        </label>
+        <label>Mensaje
+          <textarea name="message" rows="3" placeholder="¿Qué está pasando ahora?"></textarea>
+        </label>
+        <label>Autor
+          <input type="text" name="author" required placeholder="Tu nombre">
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="btn" onclick="hideModals()">Cancelar</button>
+          <button type="submit" class="btn btn-primary">Actualizar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

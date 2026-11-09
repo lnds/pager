@@ -1,0 +1,104 @@
+name: pager
+
+services:
+  incidents-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: incidents
+      POSTGRES_USER: pager
+      POSTGRES_PASSWORD: pager
+    ports:
+      - "5433:5432"
+    volumes:
+      - incidents-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pager -d incidents"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  catalog-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: catalog
+      POSTGRES_USER: pager
+      POSTGRES_PASSWORD: pager
+    ports:
+      - "5434:5432"
+    volumes:
+      - catalog-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pager -d catalog"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  incidents-migrations:
+    image: flyway/flyway:11-alpine
+    command: -url=jdbc:postgresql://incidents-db:5432/incidents -user=pager -password=pager -connectRetries=10 migrate
+    volumes:
+      - ./services/incidents/migrations:/flyway/sql:ro
+    depends_on:
+      incidents-db:
+        condition: service_healthy
+
+  catalog-migrations:
+    image: flyway/flyway:11-alpine
+    command: -url=jdbc:postgresql://catalog-db:5432/catalog -user=pager -password=pager -connectRetries=10 migrate
+    volumes:
+      - ./services/catalog/migrations:/flyway/sql:ro
+    depends_on:
+      catalog-db:
+        condition: service_healthy
+
+  notifications:
+    build: ./services/notifications
+    environment:
+      NOTIFICATIONS_API_KEY: pgr_live_7f3a9c2e81b44d0f9a6e5c1b2d8f4a70
+      WEBHOOK_URL: ""
+    ports:
+      - "8082:8080"
+
+  catalog:
+    build: ./services/catalog
+    environment:
+      DATABASE_URL: postgres://pager:pager@catalog-db:5432/catalog
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      catalog-migrations:
+        condition: service_completed_successfully
+
+  incidents:
+    build: ./services/incidents
+    environment:
+      DATABASE_URL: postgresql://pager:pager@incidents-db:5432/incidents
+      CATALOG_URL: http://catalog:8080
+      NOTIFICATIONS_URL: http://notifications:8080
+      NOTIFICATIONS_API_KEY: pgr_live_7f3a9c2e81b44d0f9a6e5c1b2d8f4a70
+      ADMIN_TOKEN: pager-admin-2024
+      DEBUG: "1"
+      TZ: America/Santiago
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      incidents-migrations:
+        condition: service_completed_successfully
+      catalog:
+        condition: service_healthy
+      notifications:
+        condition: service_started
+
+volumes:
+  incidents-data:
+  catalog-data:
