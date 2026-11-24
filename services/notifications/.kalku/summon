@@ -1,0 +1,22 @@
+#!/bin/sh
+# kalku-summon-contract: 2
+# Summons the Go kalku for this project. Written by `kalku init`.
+#
+# stdout carries the kalku protocol. Nothing is built here: `go test` runs
+# inside `prepare`, in a copy of this module in the reni, with its output
+# on stderr. It uses the `go` on the PATH, which runs the toolchain this
+# module's go.mod asks for.
+set -eu
+
+# Every summoning is handed the reni first. This kalku is told where the
+# reni is through `hello`, so the argument is taken off here rather than
+# passed on.
+: "${1:?this script is summoned by kalku, which passes the reni as the first argument}"
+shift
+
+
+command -v kalku-go >/dev/null || {
+  echo "kalku: kalku-go is not on PATH; put it beside kalku, as the release does" >&2
+  exit 127
+}
+exec kalku-go "$@"

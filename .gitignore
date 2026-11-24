@@ -2,3 +2,7 @@
 .env
 .idea/
 .vscode/
+
+# kalku: lo que deja cada corrida; el script summon sí se versiona
+**/.kalku/*
+!**/.kalku/summon

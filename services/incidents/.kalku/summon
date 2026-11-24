@@ -1,0 +1,33 @@
+#!/bin/sh
+# kalku-summon-contract: 2
+# Summons the Python kalku for this project. Written by `kalku init`.
+#
+# stdout carries the kalku protocol. The kalku runs in the project's own
+# interpreter, which is the one that has the project's packages and pytest:
+# set KALKU_PYTHON to choose another.
+set -eu
+
+# Every summoning is handed the reni first. This kalku is told where the
+# reni is through `hello`, so the argument is taken off here rather than
+# passed on.
+: "${1:?this script is summoned by kalku, which passes the reni as the first argument}"
+shift
+
+
+if [ -n "${KALKU_PYTHON:-}" ]; then
+  PY="$KALKU_PYTHON"
+elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+  PY="$VIRTUAL_ENV/bin/python"
+elif [ -x .venv/bin/python ]; then
+  PY=.venv/bin/python
+elif [ -x venv/bin/python ]; then
+  PY=venv/bin/python
+else
+  PY=python3
+fi
+
+APP="$(command -v kalku-python)" || {
+  echo "kalku: kalku-python is not on PATH; put it beside kalku, as the release does" >&2
+  exit 127
+}
+exec "$PY" "$APP" "$@"

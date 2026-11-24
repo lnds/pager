@@ -1,0 +1,11 @@
+# Configuración de kalku (mutation testing) para este servicio.
+language = "python"
+summon = ".kalku/summon"
+
+[run]
+# Mutantes que se prueban en paralelo.
+workers = 4
+
+# Un mutante que tarda más que esto cuenta como timeout. Con menos de 10 s
+# aparecen timeouts falsos, que suben el puntaje.
+timeout_floor_ms = 10000
