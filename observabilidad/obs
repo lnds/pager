@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Pager con observabilidad: trazas en Jaeger, métricas en Prometheus, tablero
+# en Grafana y carga con Locust.
+#
+#   ./observabilidad/obs construir        construye y descarga las imágenes (lo único que necesita red)
+#   ./observabilidad/obs iniciar          levanta todo y carga los datos de ejemplo
+#   ./observabilidad/obs estado           contenedores, direcciones y si llegan trazas y métricas
+#   ./observabilidad/obs abrir            abre Locust, Grafana y Jaeger en el navegador
+#   ./observabilidad/obs carga [seg] [usuarios]   corre la carga sin la interfaz de Locust
+#   ./observabilidad/obs falla <servicio> detiene un servicio (notifications, catalog o una base)
+#   ./observabilidad/obs reparar          vuelve a levantar lo que esté detenido
+#   ./observabilidad/obs detener          baja los contenedores y conserva los datos
+#   ./observabilidad/obs limpiar          baja todo y borra los datos
+#
+# Usa el proyecto de Compose «pager-obs», así que no comparte contenedores ni
+# datos con el entorno normal. Sí usa sus mismos puertos: los dos no pueden
+# estar arriba a la vez.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+PAGER=http://localhost:8080
+LOCUST=http://localhost:8089
+GRAFANA=http://localhost:3000
+JAEGER=http://localhost:16686
+PROM=http://localhost:9090
+
+compose() { docker compose -p pager-obs -f compose.yaml -f compose.observabilidad.yaml "$@"; }
+
+morir() { echo "error: $*" >&2; exit 1; }
+
+# Valor actual de una expresión de Prometheus; vacío si no hay dato.
+consulta() {
+  curl -fsS --max-time 3 --get "$PROM/api/v1/query" --data-urlencode "query=$1" 2>/dev/null \
+    | jq -r '.data.result[0].value[1] // empty' 2>/dev/null || true
+}
+
+direcciones() {
+  echo "  Pager       $PAGER"
+  echo "  Locust      $LOCUST"
+  echo "  Grafana     $GRAFANA"
+  echo "  Jaeger      $JAEGER"
+  echo "  Prometheus  $PROM"
+}
+
+cmd_construir() {
+  compose build
+  compose pull --quiet --ignore-buildable
+  echo "Imágenes construidas y descargadas."
+}
+
+cmd_iniciar() {
+  compose up -d --wait --quiet-pull
+  python3 scripts/seed.py >/dev/null || morir "no se pudieron cargar los datos de ejemplo"
+  echo "Pager con observabilidad: arriba, con los datos de ejemplo."
+  direcciones
+}
+
+cmd_estado() {
+  [ -n "$(compose ps -q 2>/dev/null)" ] || morir "el entorno no está arriba; corre ./observabilidad/obs iniciar"
+  compose ps --format '  {{.Service}}: {{.Status}}'
+  local servicios
+  servicios=$(curl -fsS --max-time 3 "$JAEGER/api/services" 2>/dev/null | jq -r '.data // [] | sort | join(", ")' || true)
+  echo "  servicios con trazas en Jaeger: ${servicios:-ninguno todavía}"
+  echo "  peticiones por segundo (último minuto): $(LC_ALL=C printf '%.1f' "$(consulta 'sum(rate(traces_span_metrics_calls_total{span_kind="SPAN_KIND_SERVER", service_name="incidents"}[1m]))')" 2>/dev/null || echo 0)"
+  direcciones
+}
+
+cmd_abrir() {
+  open "$LOCUST"
+  open "$GRAFANA/d/pager?refresh=5s"
+  open "$JAEGER/search?service=incidents&operation=POST%20%2Fincidents"
+}
+
+cmd_carga() {
+  local segundos="${1:-60}" usuarios="${2:-20}"
+  compose run --rm --no-deps locust -f /mnt/locust/locustfile.py --host http://incidents:8080 \
+    --headless --users "$usuarios" --spawn-rate 5 --run-time "${segundos}s" --only-summary
+}
+
+# Detiene un servicio para ver cómo se comporta el resto sin él.
+cmd_falla() {
+  local servicio="${1:-}"
+  case "$servicio" in
+    notifications|catalog|incidents-db|catalog-db) ;;
+    *) morir "uso: ./observabilidad/obs falla notifications|catalog|incidents-db|catalog-db" ;;
+  esac
+  compose stop "$servicio" >/dev/null 2>&1
+  echo "Falla: $servicio detenido. Para volver: ./observabilidad/obs reparar"
+}
+
+cmd_reparar() {
+  compose up -d --wait --no-build >/dev/null 2>&1 || morir "no se pudo volver a levantar el entorno"
+  echo "Todos los servicios arriba."
+}
+
+cmd_detener() {
+  compose down --remove-orphans
+}
+
+cmd_limpiar() {
+  compose down -v --remove-orphans >/dev/null 2>&1 || true
+  echo "Entorno abajo y datos borrados."
+}
+
+case "${1:-}" in
+  construir) cmd_construir ;;
+  iniciar) cmd_iniciar ;;
+  estado) cmd_estado ;;
+  abrir) cmd_abrir ;;
+  carga) shift; cmd_carga "$@" ;;
+  falla) shift; cmd_falla "$@" ;;
+  reparar) cmd_reparar ;;
+  detener) cmd_detener ;;
+  limpiar) cmd_limpiar ;;
+  *) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

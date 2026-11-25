@@ -1,0 +1,68 @@
+# OpenTelemetry Collector: recibe las trazas de los tres servicios por OTLP,
+# las manda a Jaeger y calcula con ellas las métricas de tráfico, errores y
+# latencia de cada servicio, que Prometheus lee del puerto 8889. La saturación
+# sale del uso de CPU y memoria de los contenedores.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+    collection_interval: 5s
+    container_labels_to_metric_labels:
+      com.docker.compose.service: service
+      com.docker.compose.project: project
+
+processors:
+  # Los health checks y la lectura de métricas no son tráfico de usuarios.
+  filter/sondas:
+    error_mode: ignore
+    traces:
+      span:
+        - IsMatch(name, "^GET /(health|metrics)")
+  batch:
+    timeout: 1s
+
+connectors:
+  spanmetrics:
+    histogram:
+      unit: s
+      explicit:
+        buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2500ms, 5s, 10s]
+    dimensions:
+      - name: http.method
+      - name: http.request.method
+      - name: http.status_code
+      - name: http.response.status_code
+    metrics_flush_interval: 5s
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # Conserva como etiquetas los atributos del recurso: el contenedor y su servicio.
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [filter/sondas, batch]
+      exporters: [otlp/jaeger, spanmetrics]
+    metrics/trazas:
+      receivers: [spanmetrics]
+      exporters: [prometheus]
+    metrics/contenedores:
+      receivers: [docker_stats]
+      exporters: [prometheus]

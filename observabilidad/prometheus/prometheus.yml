@@ -1,0 +1,15 @@
+# Intervalos cortos para que la demo se mueva; en producción son de 15 a 60 s.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Métricas calculadas con las trazas y uso de recursos de los contenedores.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  # Las métricas que incidents ya publicaba por su cuenta.
+  - job_name: incidents
+    static_configs:
+      - targets: ["incidents:8080"]

@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# Ensayo de punta a punta desde un estado limpio: levanta todo, corre la carga
+# desde la interfaz de Locust (por su API, igual que el botón Start) y verifica
+# que Locust, Jaeger, Prometheus y Grafana muestren datos de esa corrida.
+#
+#   ./observabilidad/prueba            usa las imágenes ya construidas
+#   ./observabilidad/prueba --limpio   borra antes las imágenes de los servicios y las reconstruye
+#   ./observabilidad/prueba --dejar    al terminar deja el entorno arriba
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+LOCUST=http://localhost:8089
+GRAFANA=http://localhost:3000
+JAEGER=http://localhost:16686
+PROM=http://localhost:9090
+SEGUNDOS=75
+
+limpio=0
+dejar=0
+for arg in "$@"; do
+  case "$arg" in
+    --limpio) limpio=1 ;;
+    --dejar) dejar=1 ;;
+    *) echo "uso: ./observabilidad/prueba [--limpio] [--dejar]" >&2; exit 1 ;;
+  esac
+done
+
+fallas=0
+
+paso() { printf '\n## %s\n' "$*"; }
+
+correr() {
+  printf '$ %s\n' "$*"
+  salida=$("$@" 2>&1) || true
+  printf '%s\n' "$salida"
+}
+
+ok() { printf '  ok: %s\n' "$*"; }
+
+falla() { printf '  FALLA: %s\n' "$*"; fallas=$((fallas + 1)); }
+
+esperar() {
+  local que="$1" patron="$2"
+  if printf '%s' "$salida" | grep -Eq -- "$patron"; then ok "$que"; else falla "$que (se esperaba /$patron/)"; fi
+}
+
+consulta() {
+  curl -fsS --max-time 5 --get "$PROM/api/v1/query" --data-urlencode "query=$1" 2>/dev/null \
+    | jq -r '.data.result[0].value[1] // "NaN"' 2>/dev/null || echo NaN
+}
+
+# Verifica que una expresión de Prometheus cumpla una comparación.
+medir() {
+  local que="$1" expr="$2" op="$3" valor="$4" v
+  v=$(consulta "$expr")
+  if awk -v v="$v" -v x="$valor" "BEGIN { exit !(v == v + 0 && v $op x) }"; then
+    ok "$que ($(LC_ALL=C printf '%.3f' "$v") $op $valor)"
+  else
+    falla "$que (valor $v, se esperaba $op $valor)"
+  fi
+}
+
+t0=$(date +%s)
+
+paso "0. Preparar"
+correr ./observabilidad/obs limpiar
+if [ "$limpio" -eq 1 ]; then
+  docker rmi -f pager-obs-incidents pager-obs-catalog pager-obs-notifications >/dev/null 2>&1 || true
+fi
+correr ./observabilidad/obs iniciar
+esperar "entorno arriba con datos" 'arriba, con los datos de ejemplo'
+
+t1=$(date +%s)
+
+paso "1. Todo responde"
+salida=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/)
+esperar "interfaz de Pager" '^200$'
+salida=$(curl -s -o /dev/null -w '%{http_code}' "$LOCUST/")
+esperar "interfaz de Locust" '^200$'
+salida=$(curl -s "$GRAFANA/api/dashboards/uid/pager" | jq -r '.dashboard.title')
+esperar "tablero de Grafana provisionado" 'señales de oro'
+salida=$(curl -s "$GRAFANA/api/datasources" | jq -r '[.[].type] | sort | join(",")')
+esperar "fuentes de datos de Grafana" '^jaeger,prometheus$'
+salida=$(curl -s -o /dev/null -w '%{http_code}' "$JAEGER/")
+esperar "interfaz de Jaeger" '^200$'
+
+paso "2. La carga, desde Locust"
+correr curl -s -X POST "$LOCUST/swarm" -d user_count=20 -d spawn_rate=5 -d host=http://incidents:8080
+esperar "Locust empieza la prueba" '"success": ?true'
+printf '  (%s s de carga)\n' "$SEGUNDOS"
+sleep "$SEGUNDOS"
+estadisticas=$(curl -s "$LOCUST/stats/requests")
+printf '%s' "$estadisticas" | jq -r '.stats[] | [.name, .method // "", .num_requests, .num_failures, (.median_response_time | floor), (.["response_time_percentile_0.95"] | floor)] | @tsv' \
+  | awk -F'\t' 'BEGIN { printf "  %-34s %-6s %7s %7s %8s %8s\n", "ruta", "método", "pedidos", "fallas", "p50 ms", "p95 ms" } { printf "  %-34s %-6s %7s %7s %8s %8s\n", $1, $2, $3, $4, $5, $6 }'
+salida=$(printf '%s' "$estadisticas" | jq -r '"estado=\(.state) usuarios=\(.user_count) rps=\(.total_rps | floor) fallas=\(.fail_ratio * 100 | floor)%"')
+printf '  %s\n' "$salida"
+esperar "Locust corriendo con 20 usuarios" 'estado=running usuarios=20'
+salida=$(printf '%s' "$estadisticas" | jq -r '.total_rps > 3')
+esperar "Locust mide el tráfico" '^true$'
+salida=$(printf '%s' "$estadisticas" | jq -r '[.stats[] | select(.name == "/incidents" and .method == "POST") | .num_requests] | add > 0')
+esperar "se abrieron incidentes" '^true$'
+salida=$(printf '%s' "$estadisticas" | jq -r '[.stats[] | select(.name | test("resolver")) | .num_requests] | add > 0')
+esperar "se resolvieron incidentes" '^true$'
+
+paso "3. Trazas en Jaeger"
+salida=$(curl -s "$JAEGER/api/services" | jq -r '.data | sort | join(",")')
+printf '  servicios: %s\n' "$salida"
+esperar "los tres servicios mandan trazas" 'catalog.*incidents.*notifications'
+trazas=$(curl -s --get "$JAEGER/api/traces" --data-urlencode service=incidents \
+  --data-urlencode 'operation=POST /incidents' --data-urlencode limit=40 --data-urlencode lookback=10m)
+salida=$(printf '%s' "$trazas" | jq -r '[.data[] | [.processes[].serviceName] | unique | join(",")] | unique | join(" | ")')
+printf '  servicios por traza de POST /incidents: %s\n' "$salida"
+esperar "hay trazas que cruzan los tres servicios" 'catalog,incidents,notifications'
+salida=$(printf '%s' "$trazas" | jq -r '[.data[] | select(([.processes[].serviceName] | unique | length) == 3)][0] | "traza \(.traceID): \(.spans | length) spans"')
+printf '  %s\n' "$salida"
+esperar "la traza tiene varios spans" ': [1-9][0-9]* spans'
+salida=$(printf '%s' "$trazas" | jq -r '[.data[].spans[].operationName] | unique | join("\n")')
+esperar "spans de la base de datos" 'SELECT|INSERT'
+esperar "span de catalog" 'GET /shifts/current'
+esperar "span de notifications" 'POST /notify'
+salida=$(curl -s "$JAEGER/api/services/incidents/operations" | jq -r '.data | join("\n")')
+if printf '%s' "$salida" | grep -q '/health'; then falla "los health checks no deben dejar trazas"; else ok "sin trazas de health checks"; fi
+
+paso "4. Métricas en Prometheus"
+K='span_kind="SPAN_KIND_SERVER"'
+for servicio in incidents catalog notifications; do
+  medir "tráfico de $servicio" "sum(rate(traces_span_metrics_calls_total{$K, service_name=\"$servicio\"}[1m]))" '>' 0
+  medir "latencia p95 de $servicio" "histogram_quantile(0.95, sum by (le) (rate(traces_span_metrics_duration_seconds_bucket{$K, service_name=\"$servicio\"}[1m])))" '>' 0
+done
+medir "el tráfico de incidents coincide con Locust" "sum(rate(traces_span_metrics_calls_total{$K, service_name=\"incidents\"}[1m]))" '>' 3
+medir "tasa de errores calculable" "(sum(rate(traces_span_metrics_calls_total{$K, service_name=\"incidents\", status_code=\"STATUS_CODE_ERROR\"}[1m])) or vector(0)) / sum(rate(traces_span_metrics_calls_total{$K, service_name=\"incidents\"}[1m]))" '>=' 0
+for servicio in incidents catalog notifications incidents-db catalog-db; do
+  medir "CPU de $servicio" "max(container_cpu_utilization_ratio{project=\"pager-obs\", service=\"$servicio\"})" '>=' 0
+done
+medir "CPU de incidents bajo carga" 'max(container_cpu_utilization_ratio{project="pager-obs", service="incidents"})' '>' 1
+medir "las métricas propias de incidents" 'sum(rate(http_requests_total{job="incidents"}[1m]))' '>' 3
+
+paso "5. El tablero de Grafana tiene datos"
+tablero=$(curl -s "$GRAFANA/api/dashboards/uid/pager")
+total=0
+vacios=0
+while IFS=$'\t' read -r titulo expr; do
+  total=$((total + 1))
+  n=$(jq -n --arg e "$expr" '{queries: [{refId: "A", datasource: {uid: "prometheus"}, expr: $e, instant: true}], from: "now-1m", to: "now"}' \
+    | curl -s -X POST "$GRAFANA/api/ds/query" -H 'Content-Type: application/json' -d @- \
+    | jq -r '[.results.A.frames[]?.data.values[1][]?] | length')
+  if [ "${n:-0}" -gt 0 ]; then
+    ok "panel «${titulo}»: $n serie(s)"
+  else
+    falla "panel «${titulo}» sin datos"
+    vacios=$((vacios + 1))
+  fi
+done < <(printf '%s' "$tablero" | jq -r '.dashboard.panels[] | select(.type != "row") | [.title, .targets[0].expr] | @tsv')
+[ "$total" -ge 10 ] && ok "$total paneles revisados" || falla "se esperaban al menos 10 paneles y hay $total"
+salida=$(curl -s --get "$GRAFANA/api/datasources/proxy/uid/jaeger/api/services" | jq -r '.data | length')
+esperar "Grafana también lee las trazas de Jaeger" '^[3-9]'
+
+paso "6. Detener la carga"
+correr curl -s "$LOCUST/stop"
+esperar "Locust se detiene" '"success": ?true'
+
+t2=$(date +%s)
+
+if [ "$dejar" -eq 1 ]; then
+  printf '\nEl entorno queda arriba (--dejar).\n'
+else
+  paso "Limpiar"
+  correr ./observabilidad/obs limpiar
+  salida=$(docker ps -a --filter label=com.docker.compose.project=pager-obs -q; docker volume ls --filter label=com.docker.compose.project=pager-obs -q)
+  if [ -z "$salida" ]; then ok "sin contenedores ni volúmenes"; else falla "quedaron contenedores o volúmenes"; fi
+fi
+
+printf '\nPreparar: %s s. Pasos 1 a 6: %s s.\n' "$((t1 - t0))" "$((t2 - t1))"
+if [ "$fallas" -eq 0 ]; then
+  echo "Ensayo completo: todo bien."
+else
+  echo "Ensayo con $fallas falla(s)."
+  exit 1
+fi
